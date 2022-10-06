@@ -10,7 +10,9 @@ module Data.Debug.Type
   , boolean
   , char
   , string
+  , atom
   , array
+  , prop
   , record
   , constructor
   , opaque
@@ -33,35 +35,39 @@ module Data.Debug.Type
   , prettyPrintDeltaWith
   , PrettyPrintOptions
   , defaultPrettyPrintOptions
+  , reprToTerm
   ) where
 
 import Prelude
 
-import Data.Array as Array
 import Data.Debug.PrettyPrinter (Content, commaSeq, compact, emptyContent, indent, leaf, noParens, noWrap, parens, printContent, surround, verbatim, wrap)
 import Data.Foldable (foldMap, all, elem)
 import Data.Maybe (Maybe(..), maybe)
 import Data.Newtype (unwrap)
+import Data.Ord (abs)
 import Data.String as String
 import Data.Tuple (Tuple(..))
-import Math as Math
+import Erl.Atom (Atom)
+import Erl.Atom as Atom
+import Erl.Data.List (List, (!!), (:))
+import Erl.Data.List as List
+import Erl.Data.Tuple (tuple1, tuple2, tuple3)
+import Foreign (Foreign, unsafeToForeign)
 
 -------------------------------------------------------------------------------
 -- BASIC DATA TYPES -----------------------------------------------------------
 
 -- | A strict rose tree type. Based on Data.Tree in Haskell's `containers`.
-data Tree a
-  = Node a (Array (Tree a))
+data Tree a = Node a (List (Tree a))
 
 rootLabel :: forall a. Tree a -> a
 rootLabel (Node r _) = r
 
-subtrees :: forall a. Tree a -> Array (Tree a)
+subtrees :: forall a. Tree a -> List (Tree a)
 subtrees (Node _ xs) = xs
 
 isLeaf :: forall a. Tree a -> Boolean
-isLeaf (Node _ []) = true
-isLeaf _ = false
+isLeaf (Node _ children) = List.null children
 
 derive instance eqTree :: Eq a => Eq (Tree a)
 derive instance ordTree :: Ord a => Ord (Tree a)
@@ -73,7 +79,7 @@ derive instance functorTree :: Functor Tree
 -- | - the label at the current node, and
 -- | - the result of applying `f` to each child,
 -- | finishing at the root.
-foldTree :: forall a b. (a -> Array b -> b) -> Tree a -> b
+foldTree :: forall a b. (a -> List b -> b) -> Tree a -> b
 foldTree f = go
   where
   go (Node x ts) = f x (map go ts)
@@ -88,13 +94,13 @@ prune :: forall a. a -> (a -> Boolean) -> Int -> Tree a -> Tree a
 prune replacement counts depth = go (max 1 depth)
   where
   -- If we've reached a leaf anyway, just print it
-  go 0 n@(Node _ []) =
+  go 0 n@(Node _ children) | List.null children =
     n
   go 0 _ =
-    Node replacement []
+    Node replacement List.nil
   go d (Node label children) =
     let
-      d' = if counts label then d-1 else d
+      d' = if counts label then d - 1 else d
     in
       Node label (map (go d') children)
 
@@ -128,11 +134,16 @@ data Label
   | Number Number
   | Boolean Boolean
   | Char Char
+  | Atom Atom
   | String String
 
   -- This label represents a value of the type `Prim.Array`. Its children
   -- should be the contents of the array.
   | Array
+
+  -- This label represents a value of the type `Data.List / Erl.Data.List`. Its children
+  -- should be the contents of the list.
+  | List
 
   -- This label represents a value of the type `Prim.Record`. Its immediate
   -- children should all have Prop labels.
@@ -141,12 +152,12 @@ data Label
   -- This node represents a property with the given name. It should only occur
   -- as a direct descendent of a Record- or Opaque-labelled node.  A node
   -- with this label should always have exactly one child: the property value.
-  | Prop String
+  | Prop Atom
 
   -- Function application; mostly intended for use with data constructors.
   -- Children of nodes with this label represent the arguments to the
   -- function/data constructor.
-  | App String
+  | App Atom
 
   -- These constructors are for representations of opaque data types, or data
   -- types where this representation is more helpful than the 'obvious'
@@ -183,7 +194,7 @@ derive instance eqLabel :: Eq Label
 derive instance ordLabel :: Ord Label
 
 mkLeaf :: Label -> Repr
-mkLeaf label = Repr (Node label [])
+mkLeaf label = Repr (Node label List.nil)
 
 -- | Create a `Repr` for an `Int`. This function should only be used to
 -- | construct `Repr` values for values of the type `Int`; other numeric types
@@ -212,30 +223,41 @@ char = mkLeaf <<< Char
 string :: String -> Repr
 string = mkLeaf <<< String
 
+-- | Create a `Repr` for a `Atom`. This function should only be used to
+-- | construct `Repr` values for values of the type `Atom`.
+atom :: Atom -> Repr
+atom = mkLeaf <<< Atom
+
 -- | Create a `Repr` for an `Array`, given its contents. This function should
 -- | only be used to construct `Repr` values for values of the type `Array a`;
 -- | other array-like types may use the `collection` function.
 array :: Array Repr -> Repr
-array = Repr <<< Node Array <<< map unRepr
+array = Repr <<< Node Array <<< List.fromFoldable <<< map unRepr
+
+-- | Create a `Repr` for an `List`, given its contents. This function should
+-- | only be used to construct `Repr` values for values of the type `List a`;
+-- | other list-like types may use the `collection` function.
+list :: List Repr -> Repr
+list = Repr <<< Node List <<< map unRepr
 
 -- | Create a `Repr` for a `Record`, given its fields. This function should
 -- | only be used to construct `Repr` values for values of the type `Record r`;
 -- | other record-like types may use the `assoc` function.
-record :: Array (Tuple String Repr) -> Repr
+record :: List (Tuple Atom Repr) -> Repr
 record =
   Repr <<< Node Record <<< makeProps
-
-makeProps :: Array (Tuple String Repr) -> Array (Tree Label)
-makeProps = map unwrapProp
   where
-  unwrapProp :: Tuple String Repr -> Tree Label
-  unwrapProp (Tuple name (Repr val)) =
-    Node (Prop name) [val]
+  makeProps :: List (Tuple Atom Repr) -> List (Tree Label)
+  makeProps = map unwrapProp
+    where
+    unwrapProp :: Tuple Atom Repr -> Tree Label
+    unwrapProp (Tuple name (Repr val)) =
+      Node (Prop name) $ List.singleton val
 
 -- | Create a `Repr` for a value constructed by a data constructor. For
 -- | example, the value `Just 3` may be represented by `constructor "Just" [int
 -- | 3]`.
-constructor :: String -> Array Repr -> Repr
+constructor :: Atom -> List Repr -> Repr
 constructor name args =
   Repr (Node (App name) (map unRepr args))
 
@@ -245,13 +267,13 @@ constructor name args =
 -- | representation.
 opaque :: String -> Repr -> Repr
 opaque name child =
-  Repr (Node (Opaque name) [unRepr child])
+  Repr (Node (Opaque name) $ List.singleton $ unRepr child)
 
 -- | Like `opaque`, but without the second `Repr` argument; for when there is
 -- | no additional information to provide.
 opaque_ :: String -> Repr
 opaque_ name =
-  Repr (Node (Opaque name) [])
+  Repr (Node (Opaque name) List.nil)
 
 -- | Create a `Repr` for an opaque type. The first argument is the type name,
 -- | and the second argument is a string representation of the value. This
@@ -260,23 +282,29 @@ opaque_ name =
 -- | able to give detailed diffs.
 opaqueLiteral :: String -> String -> Repr
 opaqueLiteral name val =
-  Repr (Node (Opaque name) [Node (Literal val) []])
+  Repr (Node (Opaque name) $ List.singleton $ Node (Literal val) List.nil)
 
 -- | Create a `Repr` for a collection type. The first argument is the type
 -- | name, the second is the contents. Defined as `\name contents -> opaque
--- | name (array contents)`.
-collection :: String -> Array Repr -> Repr
+-- | name (list contents)`.
+collection :: String -> List Repr -> Repr
 collection name contents =
-  opaque name (array contents)
+  Repr (Node (Opaque name) (unRepr <$> contents))
+
+--  opaque name (list contents)
 
 -- | Create a `Repr` for a type representing a mapping of keys to values, such
 -- | as `Map`. The first argument is the type name, the second is the contents.
-assoc :: String -> Array (Tuple Repr Repr) -> Repr
+assoc :: String -> List (Tuple Repr Repr) -> Repr
 assoc name contents =
   Repr (Node (Assoc name) (map makeAssocProp contents))
   where
   makeAssocProp :: Tuple Repr Repr -> Tree Label
-  makeAssocProp (Tuple (Repr k) (Repr v)) = Node AssocProp [k, v]
+  makeAssocProp (Tuple (Repr k) (Repr v)) = Node AssocProp $ (k : v : List.nil)
+
+prop :: Atom -> Repr -> Repr
+prop name value =
+  Repr (Node (Prop name) (List.singleton $ unRepr value))
 
 -- | Should a label be considered as adding depth (from the perspective of
 -- | only pretty-printing to a certain depth)?
@@ -288,7 +316,7 @@ addsDepth =
     _ -> true
 
 relativeError :: Number -> Number -> Number
-relativeError x y = Math.abs (x - y) / max (Math.abs x) (Math.abs y)
+relativeError x y = abs (x - y) / max (abs x) (abs y)
 
 eqRelative :: Number -> Number -> Number -> Boolean
 eqRelative error x y = relativeError x y <= error
@@ -361,45 +389,44 @@ defaultDiffOptions :: DiffOptions
 defaultDiffOptions =
   { maxRelativeError: 1e-12 }
 
-diff' :: forall a.
-  (a -> a -> Boolean) ->
-  (a -> Boolean) ->
-  Tree a ->
-  Tree a ->
-  Tree (Delta a)
+diff'
+  :: forall a
+   . (a -> a -> Boolean)
+  -> (a -> Boolean)
+  -> Tree a
+  -> Tree a
+  -> Tree (Delta a)
 diff' labelEq isUnimportantLabel = go
   where
   go left@(Node x xs) right@(Node y ys) =
-    if labelEq x y
-      then
-        let
-          children = goChildren xs ys
-        in
-          if isUnimportantLabel x && all differing children
-            then
-              Node Different [map Subtree left, map Subtree right]
-            else
-              Node (Same x) children
-      else
-        Node Different [map Subtree left, map Subtree right]
+    if labelEq x y then
+      let
+        children = goChildren xs ys
+      in
+        if isUnimportantLabel x && all differing children then
+          Node Different $ (map Subtree left : map Subtree right : List.nil)
+        else
+          Node (Same x) children
+    else
+      Node Different $ (map Subtree left : map Subtree right : List.nil)
 
-  goChildren :: Array (Tree a) -> Array (Tree a) -> Array (Tree (Delta a))
+  goChildren :: List (Tree a) -> List (Tree a) -> List (Tree (Delta a))
   goChildren xs ys =
     let
-      xlen = Array.length xs
-      ylen = Array.length ys
-      begin = Array.zipWith go xs ys
+      xlen = List.length xs
+      ylen = List.length ys
+      begin = List.zipWith go xs ys
     in
       case compare xlen ylen of
         LT ->
-          begin <> map (extra Extra1) (Array.drop xlen ys)
+          begin <> map (extra Extra1) (List.drop xlen ys)
         EQ ->
           begin
         GT ->
-          begin <> map (extra Extra2) (Array.drop ylen xs)
+          begin <> map (extra Extra2) (List.drop ylen xs)
 
   extra :: Delta a -> Tree a -> Tree (Delta a)
-  extra ctor subtree = Node ctor [map Subtree subtree]
+  extra ctor subtree = Node ctor $ List.singleton $ map Subtree subtree
 
   differing :: Tree (Delta a) -> Boolean
   differing (Node root _) =
@@ -458,10 +485,10 @@ addsDepthDelta f =
 -- | - **compactThreshold:** Controls how large a subtree is allowed to become
 -- |   before it is broken over multiple lines. The larger this value is, the
 -- |   fewer lines will be needed to pretty-print something.
-type PrettyPrintOptions
-  = { maxDepth :: Maybe Int
-    , compactThreshold :: Int
-    }
+type PrettyPrintOptions =
+  { maxDepth :: Maybe Int
+  , compactThreshold :: Int
+  }
 
 defaultPrettyPrintOptions :: PrettyPrintOptions
 defaultPrettyPrintOptions =
@@ -478,9 +505,9 @@ defaultPrettyPrintOptions =
 prettyPrintWith :: PrettyPrintOptions -> Repr -> String
 prettyPrintWith opts =
   printContent
-  <<< foldTree (withResizing labelSize opts.compactThreshold prettyPrintGo)
-  <<< pruneTo opts.maxDepth
-  <<< unRepr
+    <<< foldTree (withResizing labelSize opts.compactThreshold prettyPrintGo)
+    <<< pruneTo opts.maxDepth
+    <<< unRepr
 
   where
   pruneTo = maybe identity (prune Omitted addsDepth)
@@ -499,11 +526,13 @@ prettyPrint = prettyPrintWith defaultPrettyPrintOptions
 prettyPrintDeltaWith :: PrettyPrintOptions -> ReprDelta -> String
 prettyPrintDeltaWith opts =
   printContent
-  <<< foldTree (withResizing (deltaSize labelSize)
-                             opts.compactThreshold
-                             prettyPrintGoDelta)
-  <<< pruneTo opts.maxDepth
-  <<< unReprDelta
+    <<< foldTree
+      ( withResizing (deltaSize labelSize)
+          opts.compactThreshold
+          prettyPrintGoDelta
+      )
+    <<< pruneTo opts.maxDepth
+    <<< unReprDelta
 
   where
   pruneTo = maybe identity (prune (Same Omitted) (addsDepthDelta addsDepth))
@@ -513,21 +542,21 @@ prettyPrintDeltaWith opts =
 prettyPrintDelta :: ReprDelta -> String
 prettyPrintDelta = prettyPrintDeltaWith defaultPrettyPrintOptions
 
-measure :: forall a. (a -> Int) -> a -> Array Content -> Int
+measure :: forall a. (a -> Int) -> a -> List Content -> Int
 measure size root children =
   size root + unwrap (foldMap _.size children)
 
-withResizing :: forall a.
-  (a -> Int) ->
-  Int ->
-  (a -> Array Content -> Content) ->
-  (a -> Array Content -> Content)
+withResizing
+  :: forall a
+   . (a -> Int)
+  -> Int
+  -> (a -> List Content -> Content)
+  -> (a -> List Content -> Content)
 withResizing size threshold f root children =
-  if measure size root children <= threshold
-    then compact (f root children)
-    else f root children
+  if measure size root children <= threshold then compact (f root children)
+  else f root children
 
-prettyPrintGo :: Label -> Array Content -> Content
+prettyPrintGo :: Label -> List Content -> Content
 prettyPrintGo root children =
   case root of
     Int x ->
@@ -541,45 +570,50 @@ prettyPrintGo root children =
       leaf x
     Char x ->
       leaf x
+    Atom x ->
+      leaf x
     String x ->
       leaf x
     App name ->
       let
-        f = if Array.length children > 0 then parens else noParens
+        f = if List.null children then noParens else parens
       in
-        f (verbatim name <> foldMap (indent "  " <<< wrap) children)
+        f (verbatim (Atom.toString name) <> foldMap (indent "  " <<< wrap) children)
     Array ->
+      commaSeq "[ " " ]" children
+    List ->
       commaSeq "[ " " ]" children
     Record ->
       commaSeq "{ " " }" children
     Opaque name ->
-      if Array.null children
-        then
-          noParens $ surround "<" ">" $ verbatim name
-        else
-          noParens $
-            surround "<" ">" $
-              verbatim (name <> ":")
+      if List.null children then
+        noParens $ surround "<" ">" $ verbatim name
+      else
+        noParens
+          $ surround "<" ">"
+          $
+            verbatim (name <> ":")
               <> indent "  " (noWrap (commaSeq "" "" children))
     Literal str ->
       noParens $ verbatim str
     Assoc name ->
-      noParens $
-        surround "<" ">" $
+      noParens
+        $ surround "<" ">"
+        $
           verbatim (name <> ":") <> noWrap (commaSeq "{ " " }" children)
     AssocProp ->
-      case children of
-        [key, val] ->
+      case children !! 0, children !! 1 of
+        Just key, Just val ->
           noParens $ (surround "" ":" (noWrap key) <> noWrap val)
-        _ ->
+        _, _ ->
           -- should not happen
           emptyContent
     Prop name ->
-      case children of
-        [val] ->
+      case List.uncons children of
+        Just { head, tail } | List.null tail ->
           noParens $
-            verbatim (prettyPrintLabel name <> ":")
-            <> indent "  " (noWrap val)
+            verbatim (prettyPrintLabel (Atom.toString name) <> ":")
+              <> indent "  " (noWrap head)
         _ ->
           -- should not happen
           emptyContent
@@ -588,34 +622,33 @@ prettyPrintGo root children =
 
 prettyPrintLabel :: String -> String
 prettyPrintLabel name =
-  if isUnquotedKey name
-    then name
-    else show name
+  if isUnquotedKey name then name
+  else show name
 
-prettyPrintGoDelta :: Delta Label -> Array Content -> Content
+prettyPrintGoDelta :: Delta Label -> List Content -> Content
 prettyPrintGoDelta root children =
   case root of
     Same a ->
       prettyPrintGo a children
     Different ->
-      case children of
-        [left, right] ->
+      case children !! 0, children !! 1 of
+        Just left, Just right ->
           noParens $
             noWrap (markRemoved left) <> noWrap (markAdded right)
-        _ ->
+        _, _ ->
           -- should not happen
           emptyContent
     Extra1 ->
-      case children of
-        [x] ->
-          markRemoved x
+      case List.uncons children of
+        Just { head, tail } | List.null tail ->
+          markRemoved head
         _ ->
           -- should not happen
           emptyContent
     Extra2 ->
-      case children of
-        [x] ->
-          markAdded x
+      case List.uncons children of
+        Just { head, tail } | List.null tail ->
+          markAdded head
         _ ->
           -- should not happen
           emptyContent
@@ -652,14 +685,18 @@ labelSize =
       1
     String x ->
       if String.length x <= 15 then 1 else 2
+    Atom _ ->
+      1
     Array ->
+      1
+    List ->
       1
     Record ->
       2
     Prop name ->
-      if String.length name <= 15 then 0 else 1
+      if String.length (Atom.toString name) <= 15 then 0 else 1
     App name ->
-      if String.length name <= 15 then 1 else 2
+      if String.length (Atom.toString name) <= 15 then 1 else 2
     Opaque name ->
       if String.length name <= 15 then 1 else 2
     Literal str ->
@@ -693,7 +730,7 @@ isUnquotedKey key =
       false
     Just { head, tail } ->
       isUnquotedKeyHead head
-      && all isUnquotedKeyTail (String.toCodePointArray tail)
+        && all isUnquotedKeyTail (String.toCodePointArray tail)
 
 -- | Note that this is more restrictive than necessary, since we consider
 -- | record labels beginning with a lowercase non-ascii character to require
@@ -715,8 +752,70 @@ isNumericAscii = between "0" "9"
 -- | in fact this is not necessarily true.
 isUnquotedKeyTail :: String.CodePoint -> Boolean
 isUnquotedKeyTail =
-  (_ `elem` (map String.codePointFromChar ['_', '\'']))
+  (_ `elem` (map String.codePointFromChar [ '_', '\'' ]))
     || (isAlphaNumAscii <<< String.singleton)
 
 isAlphaNumAscii :: String -> Boolean
 isAlphaNumAscii = isLowerAlphaAscii || isUpperAlphaAscii || isNumericAscii
+
+reprToTerm :: Repr -> Foreign
+reprToTerm = reprToTerm_ <<< unRepr
+
+reprToTerm_ :: Tree Label -> Foreign
+reprToTerm_ (Node root children) =
+  case root of
+    Int x -> unsafeToForeign x
+    Number x -> unsafeToForeign x
+    Boolean x -> unsafeToForeign x
+    Char x -> unsafeToForeign x
+    Atom x -> unsafeToForeign x
+    String x -> unsafeToForeign x
+    App name ->
+      case List.uncons children of
+        Nothing ->
+          unsafeToForeign $ tuple1 name
+        Just { head, tail } | List.null tail ->
+          unsafeToForeign $ tuple2 name $ reprToTerm_ head
+        _ ->
+          unsafeToForeign $ tuple2 name $ reprToTerm_ <$> children
+    Array ->
+      unsafeToForeign $ reprToTerm_ <$> children
+    List ->
+      unsafeToForeign $ reprToTerm_ <$> children
+    Record ->
+      tupleListToMap $ reprToTerm_ <$> children
+    Opaque "List" ->
+      unsafeToForeign $ reprToTerm_ <$> children
+    Opaque "Set" ->
+      listToTuple $ reprToTerm_ <$> children
+    Opaque "function" ->
+      unsafeToForeign $ Atom.atom "[function]"
+    Opaque "proxy" ->
+      unsafeToForeign $ Atom.atom "[proxy]"
+    Opaque name ->
+      unsafeToForeign $ tuple3 (Atom.atom "opaque") name $ reprToTerm_ <$> children
+    Literal str ->
+      unsafeToForeign str
+    Assoc "Map" ->
+      tupleListToMap $ reprToTerm_ <$> children
+    Assoc name ->
+      unsafeToForeign $ tuple2 name $ tupleListToMap $ reprToTerm_ <$> children
+    AssocProp ->
+      case children !! 0, children !! 1 of
+        Just key, Just val ->
+          unsafeToForeign $ tuple2 (reprToTerm_ key) (reprToTerm_ val)
+        _, _ ->
+          -- should not happen
+          unsafeToForeign $ Atom.atom "undefined"
+    Prop name ->
+      case List.uncons children of
+        Just { head, tail } | List.null tail ->
+          unsafeToForeign $ tuple2 name $ reprToTerm_ head
+        _ ->
+          -- should not happen
+          unsafeToForeign $ Atom.atom "undefined"
+    Omitted ->
+      unsafeToForeign $ Atom.atom "..."
+
+foreign import tupleListToMap :: List Foreign -> Foreign
+foreign import listToTuple :: List Foreign -> Foreign
