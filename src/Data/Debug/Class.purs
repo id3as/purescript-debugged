@@ -32,6 +32,8 @@ import Data.Variant (Variant, on)
 import Effect (Effect)
 import Erl.Atom (Atom)
 import Erl.Atom as Atom
+import Erl.Data.Binary (Binary)
+import Erl.Data.Binary as Binary
 import Erl.Data.List ((:))
 import Erl.Data.List as ErlList
 import Erl.Data.Map as ErlMap
@@ -233,3 +235,6 @@ instance debugRepr :: Debug D.Repr where
 
 instance debugReprDelta :: Debug D.ReprDelta where
   debug _ = D.opaque_ "ReprDelta"
+
+instance Debug Binary where
+  debug bin = D.constructor (Atom.atom "Binary") (ErlList.singleton (D.string $ (show $ Binary.byteSize bin) <> " bytes"))
