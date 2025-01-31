@@ -36,6 +36,7 @@ import Erl.Data.Binary (Binary)
 import Erl.Data.Binary as Binary
 import Erl.Data.List ((:))
 import Erl.Data.List as ErlList
+import Erl.Data.List.NonEmpty as ErlNel
 import Erl.Data.Map as ErlMap
 import Erl.Process.Raw (Pid)
 import Prim.Row as Row
@@ -211,6 +212,9 @@ instance debugList :: Debug a => Debug (List.List a) where
 
 instance Debug a => Debug (ErlList.List a) where
   debug xs = D.collection "List" (map debug (ErlList.toUnfoldable xs))
+
+instance Debug a => Debug (ErlList.NonEmptyList a) where
+  debug xs = D.collection "List" (map debug (ErlNel.toUnfoldable xs))
 
 instance debugLazyList :: Debug a => Debug (LazyList.List a) where
   debug xs = D.collection "List.Lazy" (map debug (LazyList.toUnfoldable xs))
