@@ -1,0 +1,34 @@
+package:
+  dependencies:
+  - arrays
+  - bifunctors
+  - console
+  - datetime
+  - effect
+  - either
+  - enums
+  - erl-atom
+  - erl-binary
+  - erl-lists
+  - erl-maps
+  - erl-process
+  - erl-tuples
+  - foldable-traversable
+  - foreign
+  - lists
+  - maybe
+  - newtype
+  - ordered-collections
+  - partial
+  - prelude
+  - record
+  - strings
+  - tuples
+  - variant
+  name: debugged
+workspace:
+  backend:
+    cmd: purerl
+  extra_packages: {}
+  package_set:
+    url: https://raw.githubusercontent.com/purerl/package-sets/erl-0.15.3-20220629/packages.json
