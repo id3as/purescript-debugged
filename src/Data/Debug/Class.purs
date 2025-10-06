@@ -38,6 +38,7 @@ import Erl.Data.List ((:))
 import Erl.Data.List as ErlList
 import Erl.Data.List.NonEmpty as ErlNel
 import Erl.Data.Map as ErlMap
+import Erl.Data.Set as ErlSet
 import Erl.Process.Raw (Pid)
 import Prim.Row as Row
 import Prim.RowList (class RowToList, Cons, Nil, RowList)
@@ -203,6 +204,9 @@ instance (Debug k, Debug v) => Debug (ErlMap.Map k v) where
   debug m =
     D.assoc "Map"
       (map (bimap debug debug) (ErlMap.toUnfoldable m))
+
+instance (Debug a) => Debug (ErlSet.Set a) where
+  debug s = D.collection "Set" (map debug (ErlSet.toUnfoldable s))
 
 instance debugEffect :: Debug (Effect a) where
   debug _ = D.opaque_ "Effect"
